@@ -1,7 +1,7 @@
 {
   "name": "example-dapp",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,6 +17,7 @@
     "@tonconnect/ui-react": "^2.0.9",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "use-ton-connect-sender": "^1.0.1",
     "vite-plugin-node-polyfills": "^0.22.0"
   },
   "devDependencies": {

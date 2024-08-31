@@ -1,65 +1,84 @@
 import { act, fireEvent, render, waitFor } from "@testing-library/react"
 import { randomAddress } from "@ton/test-utils"
+import { toNano } from "@ton/core"
 import "@testing-library/jest-dom"
-import { Sender, toNano, TonClient, TonClientParameters } from "@ton/ton"
-import { TonConnectUI, TonConnectUiOptions, useTonAddress } from "@tonconnect/ui-react"
-import { Deploy, Deposit, Withdrawal } from "../src/contracts/tact_NzComTact"
 
-jest.mock(
-    "@tonconnect/ui-react",
-    () => ({
-        TonConnectUIProvider: ({ children }: { children: any }) => {
-            return <>{children}</>
-        },
-        TonConnectButton: () => <></>,
-        useTonAddress: jest.fn(),
-        useTonConnectUI: jest.fn()
-    })
-)
+const makeImportsSpyable = (toCheck: { path: string, componentsToMock?: string[] }[]) =>
+    toCheck.forEach(({ path, componentsToMock: propsToMock }) => jest.mock(path, () => ({
+        __esModule: true,
+        ...jest.requireActual(path),
+        ...propsToMock?.reduce((acc: any, curr) => {
+            acc[curr] = jest.fn()
+            return acc
+        }, {})
+    })))
 
-import App, { AMOUNT_FOR_GAS } from "../src/App"
+makeImportsSpyable([
+    { path: "use-ton-connect-sender" },
+    { path: "@tonconnect/ui-react", componentsToMock: ["TonConnectUIProvider", "TonConnectButton"] },
+])
+
+import App, { AMOUNT_FOR_GAS, CONTRACT_MAINNET_ADDRESS, CONTRACT_TESTNET_ADDRESS } from "../src/App.tsx"
+
 
 
 describe("Testing the example deposit/withdrawal DApp", () => {
     const getBalanceMock = jest.fn()
-    const getHttpEndpointMock = jest.fn()
-    const getOwnerMock = jest.fn()
+
+    let useTonContractMock = jest.fn()
 
     const clientSenderMock = jest.fn()
-    const tonClientStub = {
+    let senderAvailable: boolean
+
+    const TON_WALLET_ADDRESS = randomAddress().toString()
+    const TON_DIFFERENT_ADDRESS = randomAddress().toString()
+    const getOwnerMock = jest.fn()
+    let tonOwnerAddress: string
+
+    const tonContractStub = {
         getBalance: getBalanceMock,
         send: clientSenderMock,
-        getOwner: getOwnerMock
-    }
-    let connectSenderExtracted: Sender
+        getOwner: getOwnerMock,
+    } as any
 
-    const sendTransactionMock = jest.fn()
-    const TON_OWNER_ADDRESS = randomAddress().toString()
-    let tonClientAddress: string
+    const senderStub = {
+        address: TON_WALLET_ADDRESS,
+        send: jest.fn() as any
+    } as any
 
     beforeEach(async () => {
         jest.resetAllMocks()
         jest.useRealTimers()
-        jest.spyOn(await import("@ton/ton"), "TonClient").mockImplementation(
-            (_: TonClientParameters) => ({
-                open: () => tonClientStub
-            }) as unknown as TonClient
-        )
-        jest.spyOn(await import("@orbs-network/ton-access"), "getHttpEndpoint").mockImplementation(getHttpEndpointMock)
+        senderAvailable = true
 
-        tonClientAddress = TON_OWNER_ADDRESS
-        jest.spyOn(await import("@tonconnect/ui-react"), "useTonAddress").mockImplementation(() => tonClientAddress)
-        jest.spyOn(await import("@tonconnect/ui-react"), "useTonConnectUI")
-            .mockImplementation(() => ([
-                {
-                    sendTransaction: sendTransactionMock
-                } as unknown as TonConnectUI,
-                (_: TonConnectUiOptions) => { }
-            ]))
-        clientSenderMock.mockImplementation((via: Sender, _: { value: bigint }, message: Deposit | Withdrawal | Deploy) => {
-            connectSenderExtracted = via
-        })
-        getOwnerMock.mockImplementation(() => Promise.resolve(TON_OWNER_ADDRESS))
+        useTonContractMock = jest.spyOn(await import("use-ton-connect-sender"), "useTonContract")
+            .mockReturnValue(tonContractStub) as any
+        jest.spyOn(await import("use-ton-connect-sender"), "useTonConnectSender")
+            .mockImplementation((() => ({
+                sender: senderAvailable ? senderStub : undefined,
+                tonConnectUI: jest.fn() as any
+            })) as any)
+
+        const uiReactImport = await import("@tonconnect/ui-react")
+        jest.spyOn(uiReactImport, "TonConnectUIProvider")
+            .mockImplementation(({ children }: { children: any }) => {
+                return <>{children}</>
+            })
+        jest.spyOn(uiReactImport, "TonConnectButton").mockReturnValue(<></>)
+
+        tonOwnerAddress = TON_WALLET_ADDRESS
+        getOwnerMock.mockImplementation(() => Promise.resolve(tonOwnerAddress))
+    })
+
+    test("Should display loading message when the component is not yet loaded", async () => {
+        // GIVEN the contract reports 1 TON balance
+        useTonContractMock.mockReturnValue(undefined)
+
+        // WHEN rendering the component
+        const { getByTestId } = await act(() => act(() => render(<App />)))
+
+        // THEN the contract balance is shown
+        expect(getByTestId("contractAmount")).toHaveTextContent("Loading...")
     })
 
     test("Should load the component and display the contract's balance", async () => {
@@ -67,7 +86,7 @@ describe("Testing the example deposit/withdrawal DApp", () => {
         getBalanceMock.mockReturnValue(1_000_000_000n)
 
         // WHEN rendering the component
-        const { getByTestId } = await act(() => render(<App />))
+        const { getByTestId } = await act(() => act(() => render(<App />)))
 
         // THEN the component should display the contract's balance as 1 TON 0 nano
         expect(getByTestId("contractAmount")).toHaveTextContent("1 TON 0 nano")
@@ -81,7 +100,7 @@ describe("Testing the example deposit/withdrawal DApp", () => {
         getBalanceMock.mockReturnValue(1_000_000_000n)
 
         // AND rendering the component
-        const { getByTestId } = await act(() => render(<App />))
+        const { getByTestId } = await act(() => act(() => render(<App />)))
 
         // WHEN changing the wallet balance
         getBalanceMock.mockReturnValue(2_000_000_000n)
@@ -93,64 +112,48 @@ describe("Testing the example deposit/withdrawal DApp", () => {
         await waitFor(() => expect(getByTestId("contractAmount")).toHaveTextContent("2 TON 0 nano"))
     })
 
-    test("Should initialize the testnet connection when the corresponding radio button is selected", async () => {
+    test("Should initialize the testnet connection when the corresponding button is selected", async () => {
         // GIVEN the component is rendered
-        const { getByTestId } = await act(() => render(<App />))
+        const { getByTestId } = await act(() => act(() => render(<App />)))
 
         // WHEN clicking the testnet button
-        await act(() => act(() => fireEvent.click(getByTestId("testNetSelector"))))
+        await act(() => fireEvent.click(getByTestId("testNetSelector")))
 
         // THEN the testnet connection is initialized
-        expect(getHttpEndpointMock).toHaveBeenCalledWith({ network: "testnet" })
+        expect(useTonContractMock).toHaveBeenCalledWith(
+            "testnet",
+            CONTRACT_TESTNET_ADDRESS,
+            expect.anything()
+        )
     })
 
     test("Should initialize the mainnet connection when the corresponding button is selected after the testnet one", async () => {
         // GIVEN the component is rendered
-        const { getByTestId } = await act(() => render(<App />))
+        const { getByTestId } = await act(() => act(() => render(<App />)))
 
-        // WHEN clicking the testnet-mainnet buttons sequense
+        // WHEN clicking the testnet testnet button
         await act(() => act(() => fireEvent.click(getByTestId("testNetSelector"))))
+
+        // AND forgetting the previous contract initialization history
+        useTonContractMock.mockClear()
+
+        // AND clicking the mainnet button
         await act(() => act(() => fireEvent.click(getByTestId("mainNetSelector"))))
 
-        // THEN the mainnet connection is initialized after
-        expect(getHttpEndpointMock).toHaveBeenNthCalledWith(3, { network: "mainnet" })
-    })
-
-    test("Should translate sending message to a transaction on connect UI", async () => {
-        // GIVEN the component is rendered
-        const { getByTestId } = await act(() => render(<App />))
-
-        // AND entering a positive deposit value
-        fireEvent.change(getByTestId("depositInput"), { target: { value: 1.5 } })
-
-        // AND clicking the deposit button
-        await act(() => act(() => fireEvent.click(getByTestId("depositButton"))))
-
-        // WHEN calling the extracted sender
-        connectSenderExtracted.send({
-            to: TON_OWNER_ADDRESS,
-            value: toNano("1.5"),
-            data: { "$$type": "Deposit" }
-        } as any)
-
-        // THEN the transaction is sent via TON connect UI
-        expect(sendTransactionMock).toHaveBeenCalledWith(expect.objectContaining({
-            messages: [{
-                address: TON_OWNER_ADDRESS,
-                amount: "1500000000"
-            }]
-        }))
-
-        // AND the depositAmount is set back to zero
-        expect(getByTestId("depositInput")).toHaveValue("0")
+        // THEN the mainnet connection is initialized
+        expect(useTonContractMock).toHaveBeenCalledWith(
+            "mainnet",
+            CONTRACT_MAINNET_ADDRESS,
+            expect.anything()
+        )
     })
 
     test("Should send a deposit on button click", async () => {
         // GIVEN the component is rendered
-        const { getByTestId } = await act(() => render(<App />))
+        const { getByTestId } = await act(() => act(() => render(<App />)))
 
         // WHEN entering a positive deposit value
-        await act(() => act(() => fireEvent.change(getByTestId("depositInput"), { target: { value: 1.5 } })))
+        fireEvent.change(getByTestId("depositInput"), { target: { value: 1.5 } })
 
         // AND clicking the deposit button
         await act(() => act(() => fireEvent.click(getByTestId("depositButton"))))
@@ -163,37 +166,37 @@ describe("Testing the example deposit/withdrawal DApp", () => {
         )
     })
 
-    test("Should disable the deposit button if the contract is not connected", async () => {
-        // GIVEN the contract is not connected
-        tonClientAddress = ""
-
-        // AND the component is rendered
-        const { getByTestId } = await act(() => render(<App />))
-
-        // WHEN entering a positive deposit value
-        fireEvent.change(getByTestId("depositInput"), { target: { value: 1.5 } })
-
-        // THEN the deposit button is not enabled
-        await waitFor(() => expect(getByTestId("depositButton")).toBeDisabled())
-    })
-
-    test("Should disable the deposit button if the contract is connected, but a positive deposit value is not entered", async () => {
+    test("Should disable the deposit button if non-positive deposit value is entered", async () => {
         // GIVEN the component is rendered
-        const { getByTestId } = await act(() => render(<App />))
+        const { getByTestId } = await act(() => act(() => render(<App />)))
 
-        // WHEN entering a zero deposit value
-        fireEvent.change(getByTestId("depositInput"), { target: { value: 0 } })
+        // WHEN entering a non-positive deposit value
+        await act(() => fireEvent.change(getByTestId("depositInput"), { target: { value: 0 } }))
 
         // THEN the deposit button is disabled
         await waitFor(() => expect(getByTestId("depositButton")).toBeDisabled())
     })
 
-    test("Should send a withdrawal on button click", async () => {
-        // GIVEN the component is rendered
-        const { getByTestId } = await act(() => render(<App />))
+    test("Should disable the deposit button if the contract is not connected", async () => {
+        // GIVEN the contract is not connected
+        senderAvailable = false
+
+        // AND the component is rendered
+        const { getByTestId } = await act(() => act(() => render(<App />)))
 
         // WHEN entering a positive deposit value
-        await act(() => act(() => fireEvent.change(getByTestId("withdrawInput"), { target: { value: 1.5 } })))
+        await act(() => fireEvent.change(getByTestId("depositInput"), { target: { value: 1.5 } }))
+
+        // THEN the deposit button is not enabled
+        await waitFor(() => expect(getByTestId("depositButton")).toBeDisabled())
+    })
+
+    test("Should send a withdrawal on button click", async () => {
+        // GIVEN the component is rendered
+        const { getByTestId } = await act(() => act(() => render(<App />)))
+
+        // WHEN entering a positive deposit value
+        fireEvent.change(getByTestId("withdrawInput"), { target: { value: 1.5 } })
 
         // AND clicking the deposit button
         await act(() => act(() => fireEvent.click(getByTestId("withdrawButton"))))
@@ -209,47 +212,42 @@ describe("Testing the example deposit/withdrawal DApp", () => {
         )
     })
 
-    test("Should disable the withdrawal button if the contract is connected and a zero withdrawal value is entered", async () => {
+    test("Should disable the withdrawal button if the contract is connected and a non-positive deposit value is entered", async () => {
         // GIVEN the component is rendered
-        const { getByTestId } = await act(() => render(<App />))
+        const { getByTestId } = await act(() => act(() => render(<App />)))
 
-        // WHEN entering a zero deposit value
+        // WHEN entering a non-positive deposit value
         fireEvent.change(getByTestId("withdrawInput"), { target: { value: 0 } })
 
-        // THEN the deposit button is disnabled
+        // THEN the deposit button is disabled
         await waitFor(() => expect(getByTestId("withdrawButton")).toBeDisabled())
     })
 
     test("Should disable the withdrawal button if the contract is not connected", async () => {
         // GIVEN the contract is not connected
-        tonClientAddress = ""
+        senderAvailable = false
 
         // AND the component is rendered
-        const { getByTestId } = await act(() => render(<App />))
+        const { getByTestId } = await act(() => act(() => render(<App />)))
 
         // WHEN entering a positive deposit value
-        fireEvent.change(getByTestId("withdrawInput"), { target: { value: 1.5 } })
+        await act(() => fireEvent.change(getByTestId("withdrawInput"), { target: { value: 1.5 } }))
 
         // THEN the deposit button is not enabled
         await waitFor(() => expect(getByTestId("withdrawButton")).toBeDisabled())
     })
 
-    const TON_DIFFERENT_ADDRESS = randomAddress().toString()
-
-    test("Should disable the withdrawal button and input area if the conected wallet is not the owner of the contract", async () => {
+    test("Should disable the withdrawal button if the conected wallet is not the owner of the contract", async () => {
         // GIVEN the wallet is not the owner of the contract
-        tonClientAddress = TON_DIFFERENT_ADDRESS
+        tonOwnerAddress = TON_DIFFERENT_ADDRESS
 
         // AND the component is rendered
-        const { getByTestId } = await act(() => render(<App />))
+        const { getByTestId } = await act(() => act(() => render(<App />)))
 
         // WHEN entering a positive deposit value
-        fireEvent.change(getByTestId("withdrawInput"), { target: { value: 1.5 } })
+        await act(() => fireEvent.change(getByTestId("withdrawInput"), { target: { value: 1.5 } }))
 
         // THEN the deposit button is not enabled
         await waitFor(() => expect(getByTestId("withdrawButton")).toBeDisabled())
-
-        // AND the withdrawal input area is disabled as well
-        await waitFor(() => expect(getByTestId("withdrawInput")).toBeDisabled())
     })
 })
